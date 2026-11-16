@@ -1,4 +1,4 @@
-// Token Radar radar-3: a deterministic snapshot scorer and static dashboard builder using Node's standard library.
+// Token Radar radar-4-codex: a deterministic snapshot scorer and static dashboard builder using Node's standard library.
 //
 // The program reads the sealed snapshot from /input/snapshot.json (or --input <file|dir>), scores every
 // pre-token protocol with the model in lib/model.ts, writes the ranked board to /output/board.json, and
@@ -37,7 +37,7 @@ function arg(name: string, fallback: string): string {
 const inputArg = arg('input', '/input');
 const inputFile = inputArg.endsWith('.json') ? inputArg : join(inputArg, 'snapshot.json');
 if (!existsSync(inputFile)) {
-  process.stderr.write(`token radar radar-3: no snapshot at ${inputFile}: pass --input <snapshot.json|directory> or mount the sealed /input\n`);
+  process.stderr.write(`token radar radar-4-codex: no snapshot at ${inputFile}: pass --input <snapshot.json|directory> or mount the sealed /input\n`);
   process.exit(2);
 }
 const out = arg('output', process.env.MAKEFUN_OUTPUT_DIR ?? '/output');
@@ -46,30 +46,13 @@ const snapshot = parseSnapshot(readFileSync(inputFile, 'utf8'));
 const { board, radar } = buildRadar(snapshot);
 const issue = boardIssue(board, snapshot);
 if (issue !== null) {
-  process.stderr.write(`token radar radar-3: the model wrote a board the gate refuses: ${issue}\n`);
+  process.stderr.write(`token radar radar-4-codex: the model wrote a board the gate refuses: ${issue}\n`);
   process.exit(1);
 }
 
 mkdirSync(out, { recursive: true });
 writeFileSync(join(out, 'board.json'), `${JSON.stringify({ rows: board })}\n`);
-// Match fitModel's full live-comp population, including CEX; the live tab is only a top-24 sample.
-const comparables = snapshot.protocols
-  .filter((p) => p.mcap_usd !== null && p.mcap_usd > 0 && p.tvl_usd > 0)
-  .map(({ slug, name, category, tvl_usd, mcap_usd }) => ({ slug, name, category, tvl_usd, mcap_usd }));
-const groups = new Map<string, number[]>();
-for (const p of comparables) {
-  const category = p.category ?? '';
-  const ratios = groups.get(category) ?? [];
-  ratios.push(p.mcap_usd! / p.tvl_usd);
-  groups.set(category, ratios);
-}
-const comparables_summary = [...groups].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0).map(([category, ratios]) => {
-  ratios.sort((a, b) => a - b);
-  const n = ratios.length, mid = Math.floor(n / 2);
-  return { category, n, medianRatio: n % 2 ? ratios[mid]! : (ratios[mid - 1]! + ratios[mid]!) / 2 };
-});
-const dashboardData = { ...radar, comparables, comparables_summary };
-writeFileSync(join(out, 'data.js'), dataScript(dashboardData));
+writeFileSync(join(out, 'data.js'), dataScript(radar));
 
 /** Copy one directory's regular files into `to`, skipping names that start with a dot. */
 function copyFiles(from: string, to: string): string[] {
@@ -88,13 +71,13 @@ function copyFiles(from: string, to: string): string[] {
 
 copyFiles(join(here, 'dashboard'), join(out, 'dashboard'));
 const shots = copyFiles(join(here, 'screenshots'), join(out, 'screenshots'));
-if (shots.length < 3) {
-  process.stderr.write(`token radar radar-3: screenshots/ holds ${shots.length} image${shots.length === 1 ? '' : 's'}: hand in 3, the board, a detail view and a filtered view\n`);
+if (shots.length < 4) {
+  process.stderr.write(`token radar radar-4-codex: screenshots/ holds ${shots.length} image${shots.length === 1 ? '' : 's'}: hand in 4, the board, a detail view, a filtered view and the method tab\n`);
   process.exit(1);
 }
 for (const name of shots) {
   if (!IMAGE_NAME.test(name)) {
-    process.stderr.write(`token radar radar-3: screenshots/${name}: a name is letters, digits and . _ -, 1 to 128 characters\n`);
+    process.stderr.write(`token radar radar-4-codex: screenshots/${name}: a name is letters, digits and . _ -, 1 to 128 characters\n`);
     process.exit(1);
   }
 }
@@ -102,8 +85,18 @@ for (const name of shots) {
 // The dossier is written last: the scorer rebuilds it from this /output and compares bytes.
 writeFileSync(join(out, 'dossier.json'), buildDossier(out, { text_max_bytes: TEXT_MAX_BYTES, screenshots: SCREENSHOT_CAPS, dashboard: { max_files: 400, max_bytes: 4_194_304 } }));
 
+const metric = (value: number | null): string => value === null ? 'n/a' : value.toFixed(4);
+const familyFactors = Object.entries(radar.model.family_factors).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)
+  .map(([family, { factor }]) => `${family}=${metric(factor)}`).join(', ');
+const verdicts = { farm: 0, thin: 0, skip: 0 };
+for (const row of board) verdicts[row.farm_economics.net_verdict] += 1;
+const { loo, time_split } = radar.backtest;
+
 process.stdout.write(
-  `token radar radar-3: ${snapshot.protocols.length} protocols, ${snapshot.watchlist.length} on the watchlist, ${board.length} rows scored (${radar.early_size} early, ${radar.live_size} live set aside)\n` +
-    `${JSON.stringify(radar.diagnostics)}\n` +
-    `token radar radar-3: wrote ${join(out, 'board.json')}, ${join(out, 'data.js')}, ${join(out, 'dashboard')} (3 files), ${join(out, 'screenshots')} (${shots.length} images) and ${join(out, 'dossier.json')}\n`,
+  `token radar radar-4-codex: ${snapshot.protocols.length} protocols, ${snapshot.watchlist.length} on the watchlist, ${board.length} board rows, ${radar.set_aside.length} set-aside rows, ${radar.live.length} live rows\n` +
+    `token radar radar-4-codex: fit a=${metric(radar.diagnostics.a)} b=${metric(radar.diagnostics.b)} R2=${metric(radar.diagnostics.r2)} n=${radar.diagnostics.n}\n` +
+    `token radar radar-4-codex: family factors ${familyFactors}\n` +
+    `token radar radar-4-codex: backtest LOO median miss=${metric(loo.median_miss_factor)}x vs flat=${metric(loo.flat_median_miss_factor)}x; time-split median miss=${metric(time_split.median_miss_factor)}x vs flat=${metric(time_split.flat_median_miss_factor)}x\n` +
+    `token radar radar-4-codex: verdicts FARM=${verdicts.farm} THIN=${verdicts.thin} SKIP=${verdicts.skip}\n` +
+    `token radar radar-4-codex: wrote ${join(out, 'board.json')}, ${join(out, 'data.js')}, ${join(out, 'dashboard')} (3 files), ${join(out, 'screenshots')} (${shots.length} images) and ${join(out, 'dossier.json')}\n`,
 );

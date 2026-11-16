@@ -1,425 +1,47 @@
-(function () {
-  'use strict';
-
-  var DATA = window.RADAR;
-  var root = document.getElementById('board');
-  if (!DATA || !root) return;
-
-  var state = { filter: '', category: 'all', tab: 'pre', sort: 'implied', direction: -1, slug: null };
-  var wholeUsd = new Intl.NumberFormat('en-US', { maximumFractionDigits: 0 });
-  var modelFormula = 'implied = max(1, round(curve_base × category_factor × growth × maturity × chains))';
-
-  function element(tag, attrs, children) {
-    var el = document.createElement(tag);
-    attrs = attrs || {};
-    Object.keys(attrs).forEach(function (key) {
-      var value = attrs[key];
-      if (key === 'text') el.textContent = value;
-      else if (key === 'className') el.className = value;
-      else if (key.slice(0, 2) === 'on') el.addEventListener(key.slice(2).toLowerCase(), value);
-      else if (value !== null && value !== undefined) el.setAttribute(key, String(value));
-    });
-    (children || []).forEach(function (child) { if (child !== null && child !== undefined) el.appendChild(child); });
-    return el;
-  }
-
-  function text(tag, value, className) {
-    return element(tag, { text: value, className: className });
-  }
-
-  function append(parent, children) {
-    children.forEach(function (child) { if (child) parent.appendChild(child); });
-    return parent;
-  }
-
-  function compactUsd(value) {
-    if (value === null || value === undefined || !isFinite(value)) return 'n/a';
-    var n = Math.abs(value);
-    if (n >= 1000000000) return '$' + (value / 1000000000).toFixed(2) + 'B';
-    if (n >= 1000000) return '$' + (value / 1000000).toFixed(1) + 'M';
-    if (n >= 1000) return '$' + Math.round(value / 1000) + 'K';
-    return '$' + wholeUsd.format(value);
-  }
-
-  function exactUsd(value) {
-    return '$' + wholeUsd.format(Math.round(value));
-  }
-
-  function growthText(value) {
-    if (value === null || value === undefined || !isFinite(value)) return 'n/a';
-    return (value > 0 ? '+' : '') + value.toFixed(2) + '%';
-  }
-
-  function ageText(value) {
-    if (value === null || value === undefined || !isFinite(value)) return 'unknown age';
-    if (value >= 365) return (value / 365).toFixed(1) + 'y';
-    return Math.max(0, Math.round(value)) + 'd';
-  }
-
-  function score(row) {
-    var model = DATA.model;
-    var change = typeof row.change_7d === 'number' && Number.isFinite(row.change_7d) ? row.change_7d : 0;
-    var growth = Math.min(model.growth_cap, Math.max(model.growth_floor, change));
-    var growthMultiplier = 1 + (growth / 100) * model.growth_weight;
-    var age = row.age_days === null || row.age_days === undefined ? model.unknown_age_days : row.age_days;
-    var maturityMultiplier = model.maturity_floor + model.maturity_range * Math.sqrt(Math.min(Math.max(age, 0), model.maturity_days) / model.maturity_days);
-    var chains = Array.isArray(row.chains) ? row.chains.length : 0;
-    var chainMultiplier = 1 + 0.04 * Math.min(Math.max(chains - 1, 0), 4);
-    var base = row.tvl_usd > 0 ? 10 ** (model.a + model.b * Math.log10(row.tvl_usd)) : 0;
-    var category = row.category === null || row.category === undefined ? '' : row.category;
-    var categoryFactor = Object.prototype.hasOwnProperty.call(model.category_factors, category) ? model.category_factors[category] : 1;
-    var implied = Math.max(1, Math.round(base * categoryFactor * growthMultiplier * maturityMultiplier * chainMultiplier));
-    return { base: base, category: categoryFactor, growthPct: growth, growth: growthMultiplier, maturity: maturityMultiplier, chains: chainMultiplier, implied: implied };
-  }
-
-  function netVerdict(row) {
-    var effort = row.farm_economics.total_cost_usd * row.farm_economics.total_time_minutes;
-    var implied = score(row).implied;
-    return implied >= effort ? 'farm' : implied >= effort / 2 ? 'thin' : 'skip';
-  }
-
-  function parseHash() {
-    var hash = window.location.hash.replace(/^#/, '');
-    state.slug = null;
-    if (hash.indexOf('/protocol/') === 0) {
-      try { state.slug = decodeURIComponent(hash.slice('/protocol/'.length)); }
-      catch (_err) { state.slug = hash.slice('/protocol/'.length); }
-      return;
-    }
-    var queryAt = hash.indexOf('?');
-    var params = new URLSearchParams(queryAt >= 0 ? hash.slice(queryAt + 1) : '');
-    state.filter = params.get('filter') || '';
-    state.category = params.get('category') || 'all';
-    state.tab = params.get('tab') === 'live' ? 'live' : 'pre';
-  }
-
-  function boardHash() {
-    var params = new URLSearchParams();
-    if (state.filter) params.set('filter', state.filter);
-    if (state.category !== 'all') params.set('category', state.category);
-    if (state.tab === 'live') params.set('tab', 'live');
-    var query = params.toString();
-    return query ? '#/?' + query : '';
-  }
-
-  function syncBoardHash() {
-    var hash = boardHash();
-    var current = window.location.hash;
-    if (current === hash) return;
-    window.history.replaceState(null, '', window.location.pathname + window.location.search + hash);
-  }
-
-  function goTo(slug) {
-    window.location.hash = '#/protocol/' + encodeURIComponent(slug);
-    parseHash();
-    render();
-  }
-
-  function goBack() {
-    state.slug = null;
-    syncBoardHash();
-    render();
-  }
-
-  function filteredRows(list) {
-    var query = state.filter.trim().toLowerCase();
-    return list.filter(function (row) {
-      if (state.category !== 'all' && (row.category || 'Other') !== state.category) return false;
-      if (!query) return true;
-      return [row.name, row.slug, row.category, (row.chains || []).join(' ')].join(' ').toLowerCase().indexOf(query) >= 0;
-    });
-  }
-
-  function sortedRows(list) {
-    return list.slice().sort(function (a, b) {
-      var av;
-      var bv;
-      if (state.sort === 'rank') { av = a.rank; bv = b.rank; }
-      else if (state.sort === 'name') { av = a.name.toLowerCase(); bv = b.name.toLowerCase(); }
-      else if (state.sort === 'tvl') { av = a.tvl_usd; bv = b.tvl_usd; }
-      else if (state.sort === 'growth') { av = a.change_7d === null ? -Infinity : a.change_7d; bv = b.change_7d === null ? -Infinity : b.change_7d; }
-      else if (state.sort === 'age') { av = a.age_days === null ? Infinity : a.age_days; bv = b.age_days === null ? Infinity : b.age_days; }
-      else { av = score(a).implied; bv = score(b).implied; }
-      if (av < bv) return -1 * state.direction;
-      if (av > bv) return 1 * state.direction;
-      return a.rank - b.rank;
-    });
-  }
-
-  function header() {
-    return element('header', { className: 'masthead' }, [
-      element('div', { className: 'brand' }, [
-        element('span', { className: 'radar-mark', 'aria-hidden': 'true' }),
-        element('div', {}, [text('p', 'Token Radar', 'brand-title'), text('p', 'Independent protocol signals', 'brand-subtitle')])
-      ]),
-      element('div', { className: 'snapshot' }, [
-        text('div', DATA.model_version.toUpperCase() + '  /  STATIC SNAPSHOT'),
-        element('div', {}, [text('span', 'As of '), element('strong', { text: DATA.as_of })])
-      ])
-    ]);
-  }
-
-  function pageShell(content) {
-    return element('div', { className: 'page' }, [header(), content]);
-  }
-
-  function sortHeader(key, label) {
-    var active = state.sort === key;
-    var direction = active ? (state.direction > 0 ? 'ascending' : 'descending') : 'none';
-    var spoken = active ? ', ' + (state.direction > 0 ? 'ascending' : 'descending') : '';
-    return element('th', { scope: 'col', 'aria-sort': direction }, [
-      element('button', {
-        type: 'button',
-        'aria-label': 'Sort by ' + label + spoken,
-        onclick: function () {
-          if (state.sort === key) state.direction *= -1;
-          else { state.sort = key; state.direction = key === 'rank' || key === 'name' || key === 'age' ? 1 : -1; }
-          render();
-        }
-      }, [text('span', label), text('span', active ? (state.direction > 0 ? '  ↑' : '  ↓') : '', 'sort-mark')])
-    ]);
-  }
-
-  function rowElement(row, maxValue) {
-    var value = score(row).implied;
-    var width = maxValue > 0 ? Math.max(2, value / maxValue * 100) : 2;
-    var chainNames = (row.chains || []).slice(0, 2).join(', ') || 'Chain data unavailable';
-    var rowText = 'Rank ' + row.rank + ', ' + row.name + ', TVL ' + compactUsd(row.tvl_usd) + ', 7 day growth ' + growthText(row.change_7d) + ', ' + ageText(row.age_days) + ', no token, implied value ' + exactUsd(value);
-    return element('tr', {
-      tabindex: '0',
-      'data-openable': 'true',
-      'aria-label': rowText,
-      onclick: function () { goTo(row.slug); },
-      onkeydown: function (event) {
-        if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); goTo(row.slug); }
-      }
-    }, [
-      element('td', { className: 'rank mono', text: String(row.rank) }),
-      element('td', {}, [text('span', row.name, 'protocol-name'), text('span', (row.category || 'Other') + ' · ' + chainNames, 'protocol-meta')]),
-      element('td', { className: 'metric', text: compactUsd(row.tvl_usd) }),
-      element('td', { className: 'metric growth', text: growthText(row.change_7d) }),
-      element('td', { className: 'age', text: ageText(row.age_days) + ' · no token' }),
-      element('td', { className: 'value-cell' }, [
-        element('div', { className: 'value-track', 'aria-hidden': 'true' }, [element('span', { style: 'width:' + width + '%' })]),
-        text('span', compactUsd(value), 'value-label')
-      ])
-    ]);
-  }
-
-  function liveRow(row) {
-    return element('tr', {}, [
-      element('td', {}, [text('span', row.name, 'protocol-name'), text('span', row.category || 'Other', 'protocol-meta')]),
-      element('td', { className: 'protocol-meta', text: (row.chains || []).slice(0, 3).join(', ') || 'Chain data unavailable' }),
-      element('td', { className: 'metric', text: compactUsd(row.tvl_usd) }),
-      element('td', { className: 'metric growth', text: growthText(row.change_7d) }),
-      element('td', {}, [text('span', compactUsd(row.mcap_usd), 'value-label'), text('span', 'ALREADY TRADING', 'trading-tag')])
-    ]);
-  }
-
-  function tableView(rows) {
-    var live = state.tab === 'live';
-    var shown = live ? rows.slice().sort(function (a, b) { return (b.mcap_usd || 0) - (a.mcap_usd || 0); }) : sortedRows(rows);
-    var maxValue = shown.reduce(function (max, row) { return Math.max(max, score(row).implied); }, 0);
-    var table = element('table', {}, [
-      element('caption', { text: live ? 'Already trading protocols, ordered by market capitalization.' : 'Pre-token protocols. Select a row to open its full model and farm plan.' }),
-      element('thead', {}, [element('tr', {}, live ? [
-        element('th', { scope: 'col', text: 'Protocol' }), element('th', { scope: 'col', text: 'Chains' }),
-        element('th', { scope: 'col', text: 'TVL' }), element('th', { scope: 'col', text: '7d growth' }),
-        element('th', { scope: 'col', text: 'Market cap · descending' })
-      ] : [sortHeader('rank', 'Rank'), sortHeader('name', 'Protocol'), sortHeader('tvl', 'TVL'), sortHeader('growth', '7d growth'), sortHeader('age', 'Age / token'), sortHeader('implied', 'Implied value')])]),
-      element('tbody', {}, shown.map(function (row) { return live ? liveRow(row) : rowElement(row, maxValue); }))
-    ]);
-    if (!shown.length) {
-      var tbody = table.children[2];
-      tbody.appendChild(element('tr', {}, [element('td', { colspan: live ? '5' : '6' }, [
-        element('div', { className: 'empty' }, [text('p', 'No protocols match these filters.'), element('button', { type: 'button', className: 'action-button', 'aria-label': 'Clear filters', onclick: clearFilters }, [text('span', 'Clear filters')])])
-      ])]));
-    }
-    return element('div', { className: 'table-scroll' }, [table]);
-  }
-
-  function clearFilters() {
-    state.filter = '';
-    state.category = 'all';
-    state.tab = 'pre';
-    state.sort = 'implied';
-    state.direction = -1;
-    syncBoardHash();
-    render();
-  }
-
-  function modelPanel() {
-    var model = DATA.model;
-    var d = DATA.diagnostics;
-    var counts = { farm: 0, thin: 0, skip: 0 };
-    DATA.rows.forEach(function (row) { counts[netVerdict(row)] += 1; });
-    function metric(value) { return value === null ? 'n/a' : value.toFixed(4); }
-    return element('section', { className: 'model-panel', 'aria-labelledby': 'model-title' }, [
-      element('div', {}, [text('h2', 'Radar-3 model', null), text('p', 'OLS fit of live-token market cap against TVL in log10 dollars. All fitted numbers come from this snapshot.')]),
-      element('div', { className: 'formula', id: 'model-title' }, [
-        text('strong', 'log10(mcap) = a + b × log10(tvl)'),
-        text('p', 'a = ' + model.a + ' · b = ' + model.b + ' · n = ' + d.n),
-        text('p', 'R² = ' + metric(d.r2) + ' · median mcap/tvl = ' + metric(d.medianRatio) + '×'),
-        text('h3', 'Backtest · curve only'),
-        text('p', 'Train ' + d.nTrain + ' (listed before 2025-01-01) · test ' + d.nTest + ' (on/after cutoff) · undated excluded from split: ' + (d.n - d.nTrain - d.nTest)),
-        text('p', 'OOS log10 RMSE = ' + metric(d.oosRmse) + ' · mean error (predicted − observed) = ' + metric(d.oosMeanErr) + ' · median absolute error factor = ' + metric(d.medianAbsFactor) + '×'),
-        text('h3', 'Adjustments'),
-        text('p', 'category_factor = clamp(1 + (category median mcap/tvl / overall median mcap/tvl − 1) × n/(n+5), 0.25, 4). Unseen categories use 1; n is the category’s comparable count.'),
-        text('p', 'growth = 1 + clamp(change_7d, ' + model.growth_floor + ', ' + model.growth_cap + ')/100 × ' + model.growth_weight + '; missing growth = 0.'),
-        text('p', 'maturity = ' + model.maturity_floor + ' + ' + model.maturity_range + ' × sqrt(clamp(age_days, 0, ' + model.maturity_days + ')/' + model.maturity_days + '); unknown age = ' + model.unknown_age_days + ' days.'),
-        text('p', 'chains = 1 + 0.04 × min(max(chains.length − 1, 0), 4).'),
-        text('strong', modelFormula),
-        text('h3', 'Net verdict · literal value/effort screen'),
-        text('p', 'farm if implied >= total_cost_usd × total_time_minutes; thin if implied >= half that effort; else skip.'),
-        text('p', 'Across all ' + DATA.rows.length + ' board rows — farm: ' + counts.farm + ' · thin: ' + counts.thin + ' · skip: ' + counts.skip),
-        text('p', 'Totals sum the plan literally: reused capital is counted each time Cost lists it, passive hold time is included, and weekly actions count once. This screen does not estimate payouts or profit.'),
-        text('p', 'The curve is weak (R² about ' + d.r2.toFixed(2) + ', median error factor about ' + (d.medianAbsFactor === null ? 'n/a' : d.medianAbsFactor.toFixed(1) + '×') + '), so implied values are order-of-magnitude estimates, not prices.', 'model-caveat')
-      ])
-    ]);
-  }
-
-  function comparablesPanel() {
-    var summaries = DATA.comparables_summary;
-    return element('section', { className: 'detail-section comparables', 'aria-labelledby': 'comparables-title' }, [
-      text('h2', 'Live comparables behind the fit', null),
-      text('p', DATA.comparables.length + ' tokens with positive market cap and TVL, including CEX. This full fitted set differs from the ' + DATA.live_size + '-token live display sample.', 'detail-meta'),
-      element('div', { className: 'table-scroll', id: 'comparables-title' }, [element('table', {}, [
-        element('caption', { text: 'Comparable counts, median market cap to TVL ratios, and shrunk category factors.' }),
-        element('thead', {}, [element('tr', {}, ['Category', 'Count (n)', 'Median mcap/tvl', 'Category factor'].map(function (label) { return element('th', { scope: 'col', text: label }); }))]),
-        element('tbody', {}, summaries.map(function (group) { return element('tr', {}, [
-          text('td', group.category || 'Other'), text('td', String(group.n), 'metric'),
-          text('td', group.medianRatio.toFixed(4) + '×', 'metric'), text('td', DATA.model.category_factors[group.category].toFixed(4) + '×', 'metric')
-        ]); }))
-      ])]),
-      element('details', { className: 'comparable-tokens' }, [
-        text('summary', 'Inspect all ' + DATA.comparables.length + ' fitted live tokens'),
-        element('div', { className: 'table-scroll' }, [element('table', {}, [
-          element('caption', { text: 'All live tokens used to fit the curve, including CEX.' }),
-          element('thead', {}, [element('tr', {}, ['Token / category', 'TVL', 'Market cap', 'mcap/tvl'].map(function (label) { return element('th', { scope: 'col', text: label }); }))]),
-          element('tbody', {}, DATA.comparables.map(function (comp) { return element('tr', {}, [
-            element('td', {}, [text('span', comp.name, 'protocol-name'), text('span', comp.category || 'Other', 'protocol-meta')]),
-            text('td', exactUsd(comp.tvl_usd), 'metric'), text('td', exactUsd(comp.mcap_usd), 'metric'), text('td', (comp.mcap_usd / comp.tvl_usd).toFixed(4) + '×', 'metric')
-          ]); }))
-        ])])
-      ])
-    ]);
-  }
-
-  function boardView() {
-    var live = state.tab === 'live';
-    var source = state.tab === 'live' ? DATA.live : DATA.rows;
-    var rows = filteredRows(source);
-    var categories = Array.from(new Set(source.map(function (row) { return row.category || 'Other'; }))).sort(function (a, b) { return a.localeCompare(b); });
-    if (state.category !== 'all' && categories.indexOf(state.category) < 0) categories.push(state.category);
-    var heading = element('section', { className: 'page-heading' }, [
-      element('div', {}, [text('p', 'EARLY ASSET FIELD', 'eyebrow'), text('h1', state.tab === 'live' ? 'Already trading' : 'Pre-token radar')]),
-      text('p', state.tab === 'live' ? 'Live protocols are shown by market cap and kept outside the pre-token ranking.' : 'A ranked scan of protocols with no token on record.', 'heading-note')
-    ]);
-    var tabs = element('div', { className: 'tabs', role: 'tablist', 'aria-label': 'Protocol status' }, [
-      element('button', { type: 'button', role: 'tab', className: 'tab', 'aria-selected': state.tab === 'pre' ? 'true' : 'false', 'aria-label': 'Show pre-token protocols', onclick: function () { state.tab = 'pre'; syncBoardHash(); render(); } }, [text('span', 'Pre-token'), text('small', String(DATA.board_size))]),
-      element('button', { type: 'button', role: 'tab', className: 'tab', 'aria-selected': state.tab === 'live' ? 'true' : 'false', 'aria-label': 'Show live-token protocols, already trading', onclick: function () { state.tab = 'live'; syncBoardHash(); render(); } }, [text('span', 'Live-token'), text('small', String(DATA.live_size))])
-    ]);
-    var toolbar = element('div', { className: 'toolbar' }, [
-      element('div', { className: 'field' }, [element('label', { for: 'filter', text: 'Filter protocols' }), element('input', {
-        id: 'filter', type: 'search', value: state.filter, placeholder: 'Name, slug, category, or chain', 'aria-label': 'Filter by protocol name, slug, category, or chain', autocomplete: 'off',
-        oninput: function (event) { state.filter = event.target.value; syncBoardHash(); render(); }
-      })]),
-      element('div', { className: 'field' }, [element('label', { for: 'category', text: 'Category' }), element('select', {
-        id: 'category', 'aria-label': 'Filter by category', onchange: function (event) { state.category = event.target.value; syncBoardHash(); render(); }
-      }, [element('option', { value: 'all', text: 'All categories' })].concat(categories.map(function (category) { return element('option', { value: category, text: category, selected: state.category === category ? 'selected' : null }); })))])
-    ]);
-    var resultLine = element('div', { className: 'results-line' }, [
-      element('strong', { text: rows.length + ' rows shown', 'aria-live': 'polite' }),
-      live ? text('span', 'Market cap order · outside ranking') : element('div', { className: 'legend', 'aria-label': 'Metric colors' }, [
-        element('span', {}, [element('i', {}), text('span', 'Implied value')]),
-        element('span', {}, [element('i', { className: 'cyan-dot' }), text('span', '7d growth')])
-      ])
-    ]);
-    var body = element('section', { 'aria-label': live ? 'Live-token protocols' : 'Pre-token board' }, [tabs, toolbar, resultLine, tableView(rows)]);
-    return pageShell(append(element('div', {}), [heading, body, live ? element('div', { className: 'live-callout' }, [text('strong', 'Already trading'), text('span', 'These market caps are listed separately and do not enter the pre-token ranking.')]) : null, modelPanel(), comparablesPanel()]));
-  }
-
-  function factors(row) {
-    var values = score(row);
-    var labels = [
-      { title: 'Curve base value', value: exactUsd(values.base), note: '10^(' + DATA.model.a + ' + ' + DATA.model.b + ' × log10(' + row.tvl_usd + ')) = ' + values.base.toFixed(4) },
-      { title: 'Category factor', value: values.category.toFixed(6) + '×', note: (row.category || 'Other') + ' · shrunk median ratio; unseen category = 1' },
-      { title: 'Growth multiplier', value: values.growth.toFixed(6) + '×', note: 'Clamped 7d growth ' + values.growthPct + '% × weight ' + DATA.model.growth_weight },
-      { title: 'Maturity multiplier', value: values.maturity.toFixed(6) + '×', note: (row.age_days === null ? DATA.model.unknown_age_days + 'd fallback' : row.age_days + 'd old') + ' · square-root progress over ' + DATA.model.maturity_days + 'd' },
-      { title: 'Chain-breadth multiplier', value: values.chains.toFixed(6) + '×', note: (row.chains || []).length + ' chains · 0.04 per extra, capped at 4 extras' }
-    ];
-    return { values: values, list: element('div', { className: 'factor-grid' }, labels.map(function (item) {
-      return element('div', { className: 'factor' }, [element('label', { text: item.title }), element('strong', { text: item.value }), element('small', { text: item.note })]);
-    })) };
-  }
-
-  function farmPlan(row) {
-    return element('ol', { className: 'steps' }, row.farm_steps.map(function (step, index) {
-      var parts = /^(.*?) Cost:\s*(.*?)\s*Time:\s*(.*)$/.exec(step);
-      return element('li', { className: 'step' }, [
-        text('span', String(index + 1).padStart(2, '0'), 'step-number'),
-        element('div', {}, [text('h3', 'Step ' + (index + 1)), text('p', parts ? parts[1] : step), element('div', { className: 'step-meta' }, parts ? [
-          element('span', {}, [element('strong', { text: 'Cost: ' }), text('span', parts[2])]),
-          element('span', {}, [element('strong', { text: 'Time: ' }), text('span', parts[3])])
-        ] : [])])
-      ]);
-    }));
-  }
-
-  function detailView(row) {
-    if (!row) return pageShell(element('section', { className: 'missing' }, [
-      element('a', { href: boardHash() || '#/', className: 'back-link', onclick: function (event) { event.preventDefault(); goBack(); } }, [text('span', '← Board')]),
-      text('h1', 'Protocol not found'), text('p', 'This slug is not present in the current radar snapshot.')
-    ]));
-    var calc = factors(row);
-    var match = calc.values.implied === row.implied_value_usd;
-    var chains = (row.chains || []).map(function (chainName) { return element('li', { text: chainName }); });
-    var age = ageText(row.age_days) + ' · no token';
-    var back = element('a', { href: boardHash() || '#/', className: 'back-link', 'aria-label': 'Back to pre-token board', onclick: function (event) { event.preventDefault(); goBack(); } }, [text('span', '← Back to board')]);
-    var heading = element('section', { className: 'detail-head' }, [
-      back,
-      element('div', { className: 'detail-title-line' }, [element('div', {}, [text('p', row.category || 'Other', 'eyebrow'), text('h1', row.name), text('p', row.slug, 'detail-meta')]), text('span', 'RANK ' + row.rank, 'detail-rank')]),
-      element('p', { className: 'detail-meta', text: (row.chains || []).join(' · ') || 'Chain data unavailable' })
-    ]);
-    var summary = element('section', { className: 'detail-metrics', 'aria-label': 'Protocol metrics' }, [
-      element('div', { className: 'detail-metric' }, [element('label', { text: 'Total value locked' }), element('strong', { text: exactUsd(row.tvl_usd) })]),
-      element('div', { className: 'detail-metric' }, [element('label', { text: '7d growth' }), element('strong', { text: growthText(row.change_7d) })]),
-      element('div', { className: 'detail-metric' }, [element('label', { text: 'Age · token status' }), element('strong', { text: age })]),
-      element('div', { className: 'detail-metric value' }, [element('label', { text: 'Recomputed implied value' }), element('strong', { text: exactUsd(calc.values.implied) })])
-    ]);
-    var factorSection = element('section', { className: 'detail-section', 'aria-labelledby': 'factors-title' }, [
-      element('div', { className: 'section-head' }, [text('h2', 'Model factors', null), text('p', 'Calculated from this row’s snapshot values.')]),
-      element('div', { id: 'factors-title' }, [calc.list]),
-      element('p', { className: 'parity ' + (match ? 'match' : 'mismatch'), role: 'status', text: match ? 'Recomputed ' + exactUsd(calc.values.implied) + ' · board.json ' + exactUsd(row.implied_value_usd) + ' · MATCH' : 'DATA MISMATCH · recomputed ' + exactUsd(calc.values.implied) + ' but board.json carries ' + exactUsd(row.implied_value_usd) })
-    ]);
-    var chainSection = element('section', { className: 'detail-section', 'aria-labelledby': 'chains-title' }, [
-      element('div', { className: 'section-head' }, [text('h2', 'Chain footprint', null), text('p', (row.chains || []).length + ' reported chains · breadth factor ' + calc.values.chains.toFixed(4) + '×')]),
-      element('ul', { className: 'chain-list', id: 'chains-title' }, chains.length ? chains : [element('li', { text: 'No chain data' })])
-    ]);
-    var farmSection = element('section', { className: 'detail-section', 'aria-labelledby': 'farm-title' }, [
-      element('div', { className: 'section-head' }, [text('h2', 'Six-step farm plan', null), text('p', 'The exact six actions and literal costs/time recorded in board.json.')]),
-      element('div', { className: 'farm-economics' }, [
-        element('div', { className: 'factor' }, [text('label', 'Total cost'), text('strong', exactUsd(row.farm_economics.total_cost_usd)), text('small', 'Literal Cost sum, including repeated capital')]),
-        element('div', { className: 'factor' }, [text('label', 'Total time'), text('strong', row.farm_economics.total_time_minutes + ' minutes'), text('small', 'Includes passive hold; weekly actions counted once')]),
-        element('div', { className: 'factor' }, [text('label', 'Net verdict: ' + netVerdict(row)), text('strong', netVerdict(row).toUpperCase()), text('small', 'Effort threshold: ' + exactUsd(row.farm_economics.total_cost_usd) + ' × ' + row.farm_economics.total_time_minutes + ' minutes = ' + wholeUsd.format(row.farm_economics.total_cost_usd * row.farm_economics.total_time_minutes))])
-      ]),
-      element('div', { id: 'farm-title' }, [farmPlan(row)])
-    ]);
-    return pageShell(append(element('article', {}), [heading, summary, factorSection, chainSection, farmSection]));
-  }
-
-  function render() {
-    var focusId = document.activeElement && document.activeElement.id;
-    var detail = state.slug ? DATA.rows.find(function (row) { return row.slug === state.slug; }) : null;
-    root.replaceChildren(state.slug ? detailView(detail) : boardView());
-    root.setAttribute('aria-busy', 'false');
-    if (focusId) {
-      var focusTarget = document.getElementById(focusId);
-      if (focusTarget && typeof focusTarget.focus === 'function') focusTarget.focus();
-    }
-  }
-
-  parseHash();
-  render();
-  window.addEventListener('hashchange', function () { parseHash(); render(); });
+(function(){'use strict';
+var D=window.RADAR,R=document.getElementById('board');if(!D||!R)return;
+var S={tab:'pre',q:'',category:'all',family:'all',verdict:'all',sort:'implied',dir:-1,cap:1000,share:.1,slug:null};
+var nf=new Intl.NumberFormat('en-US',{maximumFractionDigits:0});
+function h(t,a,k){var e=document.createElement(t);a=a||{};(k||[]).flat().forEach(function(x){if(x!=null)e.appendChild(x)});Object.keys(a).forEach(function(n){var v=a[n];if(n==='text')e.textContent=v;else if(n==='innerHTML')e.innerHTML=v;else if(n==='className')e.className=v;else if(n.slice(0,2)==='on')e.addEventListener(n.slice(2).toLowerCase(),v);else if(v!=null)e.setAttribute(n,String(v))});return e}
+function tx(t,v,c){return h(t,{text:v,className:c})}
+function usd(v){if(v==null||!isFinite(v))return'n/a';var n=Math.abs(v);if(n>=1e9)return'$'+(v/1e9).toFixed(2)+'B';if(n>=1e6)return'$'+(v/1e6).toFixed(1)+'M';if(n>=1e3)return'$'+Math.round(v/1e3)+'K';return'$'+nf.format(Math.round(v))}
+function exact(v){return v==null?'n/a':'$'+nf.format(Math.round(v))}
+function pct(v){return v==null?'n/a':(v>0?'+':'')+Number(v).toFixed(2)+'%'}
+function age(v){return v==null?'unknown':v>=365?(v/365).toFixed(1)+'y':Math.max(0,Math.round(v))+'d'}
+function dec(v,n){return v==null?'n/a':Number(v).toFixed(n==null?3:n)}
+function fam(r){return r.family||(r.category||'Other')}
+function watch(r){return D.watchlist.indexOf(r.slug)>=0}
+function fee(r){var fs=(r.chains||[]).map(function(c){return D.fee_table[c]||D.fee_table.default||6.5});return fs.length?Math.min.apply(Math,fs):D.fee_table.default||6.5}
+function eco(r,cap,share,drop){cap=cap||S.cap;share=share==null?S.share:share;drop=drop||0;var hold=r.farm_economics.hold_days, value=r.implied_value_usd*(1-drop/100), slice=cap/(r.tvl_usd+cap)*share*value, fees=fee(r),tb=cap*.04*hold/365,net=slice-fees-tb;var verdict=net>0?'farm':slice>fees?'thin':'skip';return{slice:slice,fees:fees,tbill:tb,net:net,verdict:verdict,dph:net/(r.farm_economics.active_minutes/60),min:[100,250,500,1000,2500,5000,10000].find(function(c){return c/(r.tvl_usd+c)*share*r.implied_value_usd-fees-c*.04*hold/365>0})||null,hold:hold}}
+function parse(){var x=location.hash.slice(1),q=x.indexOf('?');S.slug=null;var path=q<0?x:x.slice(0,q),p=new URLSearchParams(q<0?'':x.slice(q+1));if(path.indexOf('/protocol/')===0){try{S.slug=decodeURIComponent(path.slice(10))}catch(_){S.slug=path.slice(10)}return}S.tab=p.get('tab')||'pre';if(['pre','live','set','method'].indexOf(S.tab)<0)S.tab='pre';S.q=p.get('q')||'';S.category=p.get('category')||'all';S.family=p.get('family')||'all';S.verdict=p.get('verdict')||'all';S.sort=p.get('sort')||'implied';S.dir=Number(p.get('dir'))||-1;S.cap=Number(p.get('cap'))||1000;S.share=(Number(p.get('share'))||10)/100}
+function hash(){var p=new URLSearchParams();if(S.tab!=='pre')p.set('tab',S.tab);if(S.q)p.set('q',S.q);if(S.category!=='all')p.set('category',S.category);if(S.family!=='all')p.set('family',S.family);if(S.verdict!=='all')p.set('verdict',S.verdict);if(S.sort!=='implied')p.set('sort',S.sort);if(S.dir!==-1)p.set('dir',S.dir);if(S.cap!==1000)p.set('cap',S.cap);if(S.share!==.1)p.set('share',Math.round(S.share*100));var q=p.toString();return q?'#/?'+q:'#/'}
+function sync(){var x=hash();if(location.hash!==x)history.replaceState(null,'',location.pathname+location.search+x)}
+function go(slug){location.hash='#/protocol/'+encodeURIComponent(slug)}
+function back(){S.slug=null;sync();render()}
+function shell(k){return h('div',{className:'page'},[head(),k])}
+function head(){return h('header',{className:'mast'},[h('div',{className:'brand'},[h('span',{className:'mark'}),h('div',{},[tx('b','Token Launch Radar'),tx('small','Snapshot model · '+D.model_version)])]),h('div',{className:'snapshot'},[tx('span','AS OF '+D.as_of),tx('span',D.board_size+' board · '+D.live_size+' live')])])}
+function button(label,fn,c){return h('button',{type:'button',className:c||'btn',onclick:fn},[tx('span',label)])}
+function tabs(){var labels=[['pre','No token yet',D.board_size],['live','Token trades',D.live_size],['set','Set aside',D.set_aside_size],['method','Method and backtest','']];return h('nav',{className:'tabs',role:'tablist'},labels.map(function(x){return h('button',{type:'button',role:'tab',className:'tab', 'aria-selected':S.tab===x[0]?'true':'false',onclick:function(){S.tab=x[0];S.slug=null;sync();render()}},[tx('span',x[1]),x[2]!==''?tx('small','('+x[2]+')'):null])}))}
+function lever(){return h('div',{className:'levers'},[h('label',{},[tx('span','Live capital'),h('input',{type:'range',min:100,max:10000,step:100,value:S.cap,oninput:function(e){S.cap=Number(e.target.value);sync();render()}}),tx('b',usd(S.cap))]),h('label',{},[tx('span','Airdrop share'),h('select',{onchange:function(e){S.share=Number(e.target.value);sync();render()}},[1,5,10,20].map(function(n){return h('option',{value:n/100,selected:S.share===n/100?'selected':null,text:n+'%'})}))])])}
+function choices(rows,key){return Array.from(new Set(rows.map(function(r){return key==='family'?fam(r):(r.category||'Other')}))).sort()}
+function filtered(rows){var q=S.q.toLowerCase().trim();return rows.filter(function(r){if(S.category!=='all'&&(r.category||'Other')!==S.category)return false;if(S.family!=='all'&&fam(r)!==S.family)return false;if(S.verdict!=='all'&&eco(r).verdict!==S.verdict)return false;if(!q)return true;return [r.name,r.slug,r.category,r.family,(r.chains||[]).join(' ')].join(' ').toLowerCase().indexOf(q)>=0})}
+function sorter(rows){return rows.slice().sort(function(a,b){var av,bv;if(S.sort==='rank'){av=a.rank;bv=b.rank}else if(S.sort==='tvl'){av=a.tvl_usd;bv=b.tvl_usd}else if(S.sort==='growth'){av=a.change_7d==null?-Infinity:a.change_7d;bv=b.change_7d==null?-Infinity:b.change_7d}else if(S.sort==='net'){av=eco(a).net;bv=eco(b).net}else{av=a.implied_value_usd;bv=b.implied_value_usd}return av===bv?a.rank-b.rank:(av<bv?-1:1)*S.dir})}
+function sortTh(key,label){var active=S.sort===key;return h('th',{'aria-sort':active?(S.dir>0?'ascending':'descending'):'none'},[h('button',{type:'button',onclick:function(){if(active)S.dir*=-1;else{S.sort=key;S.dir=key==='rank'?1:-1}sync();render()}},[tx('span',label),tx('small',active?(S.dir>0?' ↑':' ↓'):'')])])}
+function range(r){var lo=Math.min(r.p10_usd,r.p90_usd),hi=Math.max(r.p10_usd,r.p90_usd),v=r.implied_value_usd;var span=Math.max(hi, v*1.1)-Math.min(lo,v*.9)||1;var left=Math.max(0,Math.min(100,(lo-v*.9)/span*100)),width=Math.max(3,Math.min(100-left,(hi-lo)/span*100));return h('div',{className:'range','aria-label':'P10-P90 '+exact(lo)+' to '+exact(hi)},[h('i',{style:'left:'+left+'%;width:'+width+'%'}),tx('small','P10 '+usd(lo)+' · P90 '+usd(hi))])}
+function verdict(v){return tx('span',v.toUpperCase(), 'verdict '+v)}
+function boardTr(r){var e=eco(r),v=r.implied_value_usd;return h('tr',{className:'click',tabindex:'0',onclick:function(){go(r.slug)},onkeydown:function(x){if(x.key==='Enter'||x.key===' '){x.preventDefault();go(r.slug)} }},[
+ tx('td',String(r.rank),'rank'),h('td',{},[tx('b',r.name,'name'),watch(r)?tx('em','WATCHLIST','tag'):null,tx('small',(r.category||'Other')+' · '+fam(r),'muted')]),tx('td',usd(r.tvl_usd),'mono'),tx('td',pct(r.change_7d),'mono growth'),tx('td',age(r.age_days),'mono'),h('td',{className:'value'},[tx('b',usd(v)),range(r)]),tx('td',usd(e.slice),'mono'),h('td',{},[tx('b',usd(e.net),'mono'),verdict(e.verdict)])])}
+function liveTr(r){return h('tr',{},[h('td',{},[tx('b',r.name,'name'),tx('small',r.category||'Other','muted')]),tx('td',(r.chains||[]).join(', '),'muted'),tx('td',usd(r.tvl_usd),'mono'),tx('td',pct(r.change_7d),'mono growth'),tx('td',usd(r.mcap_usd),'mono')])}
+function setTr(r){return h('tr',{},[h('td',{},[tx('b',r.name,'name'),tx('small',r.category||'Other','muted')]),tx('td',usd(r.tvl_usd),'mono'),tx('td',r.reason,'reason')])}
+function boardTable(rows){var live=S.tab==='live',set=S.tab==='set',shown=live?rows.slice().sort(function(a,b){return(b.mcap_usd||0)-(a.mcap_usd||0)}):rows;var body=shown.map(live?liveTr:set?setTr:boardTr);var heads=live?[tx('th','Protocol'),tx('th','Chains'),tx('th','TVL'),tx('th','7d'),tx('th','Market cap')]:set?[tx('th','Protocol'),tx('th','TVL'),tx('th','Reason')]:[sortTh('rank','Rank'),sortTh('name','Protocol'),sortTh('tvl','TVL'),sortTh('growth','7d'),tx('th','Age'),sortTh('implied','Implied + P10-P90'),tx('th','Slice'),sortTh('net','Net / verdict')];if(!body.length)body=[h('tr',{},[h('td',{colSpan:heads.length},[tx('p','No rows match these filters.','empty')])])];return h('div',{className:'scroll'},[h('table',{},[h('thead',{},[h('tr',{},heads)]),h('tbody',{},body)])])}
+function board(){var src=S.tab==='live'?D.live:S.tab==='set'?D.set_aside:D.rows;var rows=S.tab==='pre'?sorter(filtered(src)):filtered(src);var cats=choices(src,'category'),families=S.tab==='pre'?choices(src,'family'):[];return shell(h('main',{},[h('section',{className:'intro'},[tx('p','TOKEN LAUNCH RADAR','eyebrow'),tx('h1',S.tab==='pre'?'No token yet':S.tab==='live'?'Token trades':'Set aside'),tx('p',S.tab==='pre'?'A ranked scan with explicit uncertainty and a live farm economics screen.':S.tab==='live'?'Protocols with token records, shown separately from the launch board.':'Excluded rows stay visible with the exact board rule that set them aside.','lead')]),tabs(),S.tab==='pre'?lever():null,S.tab==='method'?method():null,S.tab==='method'?null:h('section',{},[h('div',{className:'filters'},[h('label',{},[tx('span','Search'),h('input',{type:'search',value:S.q,placeholder:'name, slug, chain',oninput:function(e){S.q=e.target.value;sync();render()}})]),h('label',{},[tx('span','Category'),h('select',{onchange:function(e){S.category=e.target.value;sync();render()}},[h('option',{value:'all',selected:S.category==='all'?'selected':null,text:'All categories'})].concat(cats.map(function(x){return h('option',{value:x,selected:S.category===x?'selected':null,text:x})})))]),S.tab==='pre'?h('label',{},[tx('span','Family'),h('select',{onchange:function(e){S.family=e.target.value;sync();render()}},[h('option',{value:'all',selected:S.family==='all'?'selected':null,text:'All families'})].concat(families.map(function(x){return h('option',{value:x,selected:S.family===x?'selected':null,text:x})})))]):null,S.tab==='pre'?h('label',{},[tx('span','Verdict'),h('select',{onchange:function(e){S.verdict=e.target.value;sync();render()}},['all','farm','thin','skip'].map(function(x){return h('option',{value:x,selected:S.verdict===x?'selected':null,text:x==='all'?'All verdicts':x.toUpperCase()})}))]):null]),tx('p',rows.length+' rows shown · capital '+usd(S.cap)+' · share '+Math.round(S.share*100)+'%','count'),boardTable(rows)])]))}
+function factors(r){var m=r.model||{},vals=[['Curve value',m.base_value_usd,'TVL fitted curve'],['Family ×',m.family_factor,'family '+fam(r)],['Growth ×',m.growth_multiplier,'7d '+pct(r.change_7d)],['Seasoning ×',m.seasoning_multiplier,'age '+age(r.age_days)],['Sibling ×',r.sibling_multiplier,'name overlap adjustment'],['Implied value',r.implied_value_usd,'rounded product']];return vals}
+function peers(r){return D.comparables.filter(function(c){return c.family===fam(r)}).sort(function(a,b){return Math.abs(Math.log(a.tvl_usd/r.tvl_usd))-Math.abs(Math.log(b.tvl_usd/r.tvl_usd))||a.slug.localeCompare(b.slug)}).slice(0,5)}
+function svgCurve(){var cs=D.comparables,rs=D.rows,all=cs.concat(rs),xs=all.map(function(x){return Math.log10(x.tvl_usd)}),ys=cs.map(function(x){return Math.log10(x.mcap_usd)}),minx=Math.min.apply(Math,xs),maxx=Math.max.apply(Math,xs),miny=Math.min.apply(Math,ys),maxy=Math.max.apply(Math,ys);function X(x){return 8+(Math.log10(x)-minx)/(maxx-minx)*384}function Y(y){return 178-(y-miny)/(maxy-miny)*156}var p=cs.map(function(x){return '<circle cx="'+X(x.tvl_usd).toFixed(1)+'" cy="'+Y(Math.log10(x.mcap_usd)).toFixed(1)+'" r="2" class="comp"/>'}).join('')+rs.map(function(x){return '<circle cx="'+X(x.tvl_usd).toFixed(1)+'" cy="'+Y(Math.log10(x.implied_value_usd)).toFixed(1)+'" r="2" class="boardpt"/>'}).join('');var a=D.model.a,b=D.model.b;return '<svg viewBox="0 0 400 190" role="img" aria-label="Curve scatter"><path class="curve" d="M '+X(10**minx)+' '+Y(a+b*minx)+' L '+X(10**maxx)+' '+Y(a+b*maxx)+'"/>'+p+'<text x="8" y="188">log TVL</text><text x="310" y="12">● comps　● board</text></svg>'}
+function svgOos(){var ps=D.time_split_points||[],all=ps.map(function(p){return[p.predicted_usd,p.actual_usd]}),mx=Math.max.apply(Math,[1].concat(all.flat())),L=10, W=380;function X(v){return L+Math.log10(v)/Math.log10(mx)*W}function Y(v){return 180-Math.log10(v)/Math.log10(mx)*W*.42}var pts=ps.map(function(p){return '<circle cx="'+X(p.predicted_usd).toFixed(1)+'" cy="'+Y(p.actual_usd).toFixed(1)+'" r="2"/>'}).join('');return '<svg viewBox="0 0 400 190" role="img" aria-label="Out of sample predicted versus real market caps"><path class="band" d="M '+X(1)+' '+Y(3)+' L '+X(mx/3)+' '+Y(mx)+' L '+X(mx)+' '+Y(mx)+' L '+X(mx)+' '+Y(mx/3)+' Z"/><path class="diag" d="M '+X(1)+' '+Y(1)+' L '+X(mx)+' '+Y(mx)+'"/>'+pts+'<text x="8" y="188">predicted mcap</text><text x="280" y="14">actual ↑</text></svg>'}
+function method(){var m=D.model,d=D.diagnostics,b=D.backtest,metric=function(x){return x==null?'n/a':Number(x).toFixed(3)},famRows=Object.keys(m.family_factors).sort().map(function(k){var x=m.family_factors[k];return h('tr',{},[tx('td',k),tx('td',dec(x.factor,3)+'×','mono'),tx('td',String(x.n),'mono')])});return h('section',{className:'method'},[tx('h2','Method and backtest'),tx('p','Universe: '+D.board_size+' board rows, '+D.live_size+' token trades, '+D.set_aside_size+' set aside. Fitted comparables n='+d.n+'.','lead'),h('div',{className:'method-grid'},[h('article',{},[tx('h3','Universe / Curve'),tx('p','log10(mcap) = a + b × log10(TVL). a='+metric(d.a)+' · b='+metric(d.b)+' · R²='+metric(d.r2)+' · n='+d.n+'.'),tx('p','The curve is weak (R² about '+d.r2.toFixed(2)+'). Values are order-of-magnitude estimates, not prices.'),h('div',{className:'chart',innerHTML:svgCurve()})]),h('article',{},[tx('h3','Growth and seasoning'),tx('p','Seasoning slope '+metric(d.seasoningSlope)+' per log10 age day. Factor checks: growth correlation '+metric(b.factor_check.growth_correlation)+', age correlation '+metric(b.factor_check.age_correlation)+'. These adjustments add little signal.'),tx('p','Family factors are shrunk toward 1; sibling overlap can halve a pre-token value.'),h('table',{},[h('thead',{},[h('tr',{},[tx('th','Family'),tx('th','Factor'),tx('th','n')])]),h('tbody',{},famRows)])])]),h('div',{className:'method-grid'},[h('article',{},[tx('h3','Backtests'),tx('p','LOO: '+metric(b.loo.median_miss_factor)+'× median miss vs flat '+metric(b.loo.flat_median_miss_factor)+'×; within 3× '+metric(b.loo.within_3x_pct)+'% vs '+metric(b.loo.flat_within_3x_pct)+'%.'),tx('p','Time split train '+b.time_split.train_n+' / test '+b.time_split.test_n+': '+metric(b.time_split.median_miss_factor)+'× vs flat '+metric(b.time_split.flat_median_miss_factor)+'×; within 3× '+metric(b.time_split.within_3x_pct)+'% vs '+metric(b.time_split.flat_within_3x_pct)+'%.'),tx('p','Band calibration: 50% '+metric(b.bands.coverage_50_pct)+'%, 80% '+metric(b.bands.coverage_80_pct)+'%.'),h('div',{className:'chart',innerHTML:svgOos()})]),h('article',{},[tx('h3','Farm plans / Limits'),tx('p','Fee table (lowest reported chain fee): '+Object.keys(D.fee_table).map(function(k){return k+' $'+D.fee_table[k]}).join(' · ')),tx('p','Verdict rule at chosen levers: FARM when net > 0; THIN when slice beats fees; otherwise SKIP. Net subtracts chain fees and 4% T-bill opportunity cost over hold.'),tx('p','This is a screening tool. It does not predict an airdrop, payout, liquidity, or token price. Review protocol terms and keep the uncertainty visible.')])])])}
+function farmGrid(r){var e=eco(r),sens=[5,10,20].map(function(drop){return h('tr',{},[tx('th','Implied -'+drop+'%'),[1000,10000,100000].map(function(c){var x=eco(r,c,S.share,drop);return tx('td',usd(x.net)+' '+x.verdict.toUpperCase(),'mono')})])});return h('section',{className:'detail-section'},[h('div',{className:'section-head'},[tx('h2','Farm economics'),lever()]),h('div',{className:'econ'},[['Slice',usd(e.slice)],['Fees',usd(e.fees)],['T-bill',usd(e.tbill)],['Net',usd(e.net)],['$/active hour',usd(e.dph)],['Min deposit',e.min?usd(e.min):'none']].map(function(x){return h('div',{},[tx('small',x[0]),tx('b',x[1])])})),h('table',{className:'sensitivity'},[h('thead',{},[h('tr',{},[tx('th','Sensitivity'),tx('th','$1K'),tx('th','$10K'),tx('th','$100K')])]),h('tbody',{},sens)])])}
+function detail(r){if(!r)return shell(h('section',{className:'missing'},[button('← Board',back),tx('h1','Protocol not found'),tx('p','This slug is not in the current snapshot.') ]));var fs=factors(r),product=fs.slice(1,5).reduce(function(a,x){return a*x[1]},fs[0][1]),match=Math.round(product)===r.implied_value_usd,ps=peers(r);return shell(h('article',{},[h('section',{className:'detail-head'},[button('← Back to board',back),tx('p',r.category||'Other','eyebrow'),tx('h1',r.name),tx('p',r.slug+' · '+fam(r)+' · rank '+r.rank,'muted')]),h('section',{className:'metrics'},[['TVL',usd(r.tvl_usd)],['7d',pct(r.change_7d)],['Age',age(r.age_days)],['Implied',usd(r.implied_value_usd)]].map(function(x){return h('div',{},[tx('small',x[0]),tx('b',x[1])])})),h('section',{className:'detail-section'},[tx('h2','Factor-by-factor build'),h('div',{className:'factor-grid'},fs.map(function(x){return h('div',{},[tx('small',x[0]),tx('b',typeof x[1]==='number'&&x[0]!=='Implied value'&&x[0]!=='Curve value'?dec(x[1],4)+'×':usd(x[1])),tx('span',x[2],'muted')])})),tx('p',(match?'MATCH':'MISMATCH')+' · recompute '+exact(Math.round(product))+' from curve × family × growth × seasoning × sibling; board '+exact(r.implied_value_usd),'parity '+(match?'ok':'bad'))]),h('section',{className:'detail-section'},[tx('h2','Nearest trading peers'),h('table',{},[h('thead',{},[h('tr',{},[tx('th','Name'),tx('th','Family'),tx('th','TVL'),tx('th','Mcap')])]),h('tbody',{},ps.map(function(p){return h('tr',{},[tx('td',p.name),tx('td',p.family),tx('td',usd(p.tvl_usd),'mono'),tx('td',usd(p.mcap_usd),'mono')])}))])]),h('section',{className:'detail-section'},[tx('h2','Chain footprint'),tx('p',(r.chains||[]).join(' · ')+' · fee charged '+usd(fee(r)),'lead')]),farmGrid(r),h('section',{className:'detail-section'},[tx('h2','Six farm steps'),h('ol',{className:'steps'},r.farm_steps.map(function(s,i){var z=/^(.*?) Cost:\s*(.*?)\s*Time:\s*(.*)$/.exec(s);return h('li',{},[tx('b',String(i+1).padStart(2,'0')),h('div',{},[tx('p',z?z[1]:s),tx('small',z?'Cost: '+z[2]+' · Time: '+z[3]:'')])])}))])]))}
+function render(){parse();R.replaceChildren(S.slug?detail(D.rows.find(function(r){return r.slug===S.slug})):S.tab==='method'?shell(h('main',{},[h('section',{className:'intro'},[tx('p','MODEL NOTE','eyebrow'),tx('h1','Method and backtest')]),tabs(),method()])):board());R.setAttribute('aria-busy','false')}
+render();addEventListener('hashchange',render);
 })();
