@@ -190,3 +190,40 @@ tbody tr[data-openable="true"]:focus-visible { outline: 2px solid var(--focus); 
   .detail-metric:first-child, .factor:first-child { padding-left: 8px; }
   .detail-metric strong { font-size: 15px; }
 }
+
+.tag-row { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 8px; }
+.tag { display: inline-block; padding: 2px 6px; border: 1px solid var(--line); border-radius: 2px; color: var(--cyan); font: 10px var(--mono); text-transform: uppercase; }
+.range-track { position: relative; width: 100%; height: 4px; margin-bottom: 8px; background: #283333; }
+.range-bar { position: absolute; top: 0; height: 100%; background: rgba(239,189,105,.45); }
+.range-mark { position: absolute; top: -3px; width: 2px; height: 10px; background: var(--amber); }
+.range-label { display: block; margin-top: 4px; color: var(--quiet); font: 11px var(--mono); }
+.verdict { display: inline-block; padding: 2px 8px; border-radius: 2px; font: 11px var(--mono); font-weight: 700; }
+.verdict-farm { background: rgba(96,214,223,.16); color: var(--cyan); }
+.verdict-thin { background: rgba(239,189,105,.16); color: var(--amber); }
+.verdict-skip { background: rgba(154,168,165,.16); color: var(--muted); }
+.net-value { display: block; margin-top: 6px; color: var(--text); font: 13px var(--mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.toolbar-pre { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.toolbar-live, .toolbar-aside { grid-template-columns: minmax(240px, 1fr) minmax(180px, 260px); }
+.farm-levers { display: grid; grid-template-columns: minmax(180px, 260px) minmax(180px, 260px); gap: 16px; margin-bottom: 16px; }
+.farm-economics-6 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.factor-grid-6 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.factor-grid-6 .factor:nth-child(3n) { border-right: 0; }
+.factor-grid-6 .factor:nth-child(-n+3) { border-bottom: 1px solid var(--line); }
+.sensitivity { margin: 16px 0; }
+.sensitivity td { height: 48px; }
+.detail-metric small { display: block; margin-top: 8px; color: var(--quiet); font-size: 11px; }
+.detail-section svg { display: block; width: 100%; height: auto; margin: 16px 0; }
+.detail-section svg text { font-family: var(--mono); }
+@media (max-width: 760px) {
+  .toolbar-pre { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .factor-grid-6 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .factor-grid-6 .factor:nth-child(3n) { border-right: 1px solid var(--line); }
+  .factor-grid-6 .factor:nth-child(2n) { border-right: 0; }
+  .factor-grid-6 .factor:nth-child(-n+3) { border-bottom: 0; }
+  .factor-grid-6 .factor:nth-child(-n+4) { border-bottom: 1px solid var(--line); }
+}
+@media (max-width: 520px) {
+  .toolbar-pre { grid-template-columns: 1fr; }
+  .farm-levers { grid-template-columns: 1fr; }
+  .farm-economics-6 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}

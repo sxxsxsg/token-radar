@@ -1,4 +1,4 @@
-// Token Radar radar-3: a deterministic snapshot scorer and static dashboard builder using Node's standard library.
+// Token Radar radar-4: a deterministic snapshot scorer and static dashboard builder using Node's standard library.
 //
 // The program reads the sealed snapshot from /input/snapshot.json (or --input <file|dir>), scores every
 // pre-token protocol with the model in lib/model.ts, writes the ranked board to /output/board.json, and
@@ -6,9 +6,7 @@
 // the summary the judge reads, with the vendored make.fun library.
 //
 // The dashboard is a static page, no framework and no network: dashboard/index.html, dashboard/app.css
-// and dashboard/app.js read /output/data.js, which this program writes from the same board. A starting
-// point, not a winner: it covers the watchlist, states the model and gives every protocol a farm plan.
-// Change the model, the page or the plan; keep the gate's shape.
+// and dashboard/app.js read /output/data.js, which this program writes from the same board.
 //
 // Outside the grader's container, MAKEFUN_OUTPUT_DIR stands in for /output:
 //   mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts --input ../input/snapshot.json
@@ -37,7 +35,7 @@ function arg(name: string, fallback: string): string {
 const inputArg = arg('input', '/input');
 const inputFile = inputArg.endsWith('.json') ? inputArg : join(inputArg, 'snapshot.json');
 if (!existsSync(inputFile)) {
-  process.stderr.write(`token radar radar-3: no snapshot at ${inputFile}: pass --input <snapshot.json|directory> or mount the sealed /input\n`);
+  process.stderr.write(`token radar radar-4: no snapshot at ${inputFile}: pass --input <snapshot.json|directory> or mount the sealed /input\n`);
   process.exit(2);
 }
 const out = arg('output', process.env.MAKEFUN_OUTPUT_DIR ?? '/output');
@@ -46,30 +44,13 @@ const snapshot = parseSnapshot(readFileSync(inputFile, 'utf8'));
 const { board, radar } = buildRadar(snapshot);
 const issue = boardIssue(board, snapshot);
 if (issue !== null) {
-  process.stderr.write(`token radar radar-3: the model wrote a board the gate refuses: ${issue}\n`);
+  process.stderr.write(`token radar radar-4: the model wrote a board the gate refuses: ${issue}\n`);
   process.exit(1);
 }
 
 mkdirSync(out, { recursive: true });
 writeFileSync(join(out, 'board.json'), `${JSON.stringify({ rows: board })}\n`);
-// Match fitModel's full live-comp population, including CEX; the live tab is only a top-24 sample.
-const comparables = snapshot.protocols
-  .filter((p) => p.mcap_usd !== null && p.mcap_usd > 0 && p.tvl_usd > 0)
-  .map(({ slug, name, category, tvl_usd, mcap_usd }) => ({ slug, name, category, tvl_usd, mcap_usd }));
-const groups = new Map<string, number[]>();
-for (const p of comparables) {
-  const category = p.category ?? '';
-  const ratios = groups.get(category) ?? [];
-  ratios.push(p.mcap_usd! / p.tvl_usd);
-  groups.set(category, ratios);
-}
-const comparables_summary = [...groups].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0).map(([category, ratios]) => {
-  ratios.sort((a, b) => a - b);
-  const n = ratios.length, mid = Math.floor(n / 2);
-  return { category, n, medianRatio: n % 2 ? ratios[mid]! : (ratios[mid - 1]! + ratios[mid]!) / 2 };
-});
-const dashboardData = { ...radar, comparables, comparables_summary };
-writeFileSync(join(out, 'data.js'), dataScript(dashboardData));
+writeFileSync(join(out, 'data.js'), dataScript(radar));
 
 /** Copy one directory's regular files into `to`, skipping names that start with a dot. */
 function copyFiles(from: string, to: string): string[] {
@@ -88,13 +69,13 @@ function copyFiles(from: string, to: string): string[] {
 
 copyFiles(join(here, 'dashboard'), join(out, 'dashboard'));
 const shots = copyFiles(join(here, 'screenshots'), join(out, 'screenshots'));
-if (shots.length < 3) {
-  process.stderr.write(`token radar radar-3: screenshots/ holds ${shots.length} image${shots.length === 1 ? '' : 's'}: hand in 3, the board, a detail view and a filtered view\n`);
+if (shots.length < 4) {
+  process.stderr.write(`token radar radar-4: screenshots/ holds ${shots.length} image${shots.length === 1 ? '' : 's'}: hand in 4, the board, a detail view, a filtered view and the method tab\n`);
   process.exit(1);
 }
 for (const name of shots) {
   if (!IMAGE_NAME.test(name)) {
-    process.stderr.write(`token radar radar-3: screenshots/${name}: a name is letters, digits and . _ -, 1 to 128 characters\n`);
+    process.stderr.write(`token radar radar-4: screenshots/${name}: a name is letters, digits and . _ -, 1 to 128 characters\n`);
     process.exit(1);
   }
 }
@@ -102,8 +83,13 @@ for (const name of shots) {
 // The dossier is written last: the scorer rebuilds it from this /output and compares bytes.
 writeFileSync(join(out, 'dossier.json'), buildDossier(out, { text_max_bytes: TEXT_MAX_BYTES, screenshots: SCREENSHOT_CAPS, dashboard: { max_files: 400, max_bytes: 4_194_304 } }));
 
+const d = radar.backtest;
+const verdicts = { farm: 0, thin: 0, skip: 0 };
+for (const r of board) verdicts[r.farm_economics.net_verdict]++;
 process.stdout.write(
-  `token radar radar-3: ${snapshot.protocols.length} protocols, ${snapshot.watchlist.length} on the watchlist, ${board.length} rows scored (${radar.early_size} early, ${radar.live_size} live set aside)\n` +
-    `${JSON.stringify(radar.diagnostics)}\n` +
-    `token radar radar-3: wrote ${join(out, 'board.json')}, ${join(out, 'data.js')}, ${join(out, 'dashboard')} (3 files), ${join(out, 'screenshots')} (${shots.length} images) and ${join(out, 'dossier.json')}\n`,
+  `token radar radar-4: ${snapshot.protocols.length} protocols, ${snapshot.watchlist.length} on the watchlist, ${board.length} rows scored (${radar.set_aside_size} set aside, ${radar.live_size} live)\n` +
+    `curve: a=${radar.model.a.toFixed(4)} b=${radar.model.b.toFixed(4)} R2=${radar.model.r2.toFixed(4)} n=${radar.model.n_comps}\n` +
+    `backtest: LOO median miss x${d.loo_median_miss?.toFixed(2) ?? 'n/a'} (${d.loo_within_3x === null ? 'n/a' : `${Math.round(d.loo_within_3x * 100)}% within 3x`}) vs flat x${d.loo_flat_median_miss?.toFixed(2) ?? 'n/a'}; time split x${d.ts_median_miss?.toFixed(2) ?? 'n/a'} vs flat x${d.ts_flat_median_miss?.toFixed(2) ?? 'n/a'} (train ${d.train_n}, test ${d.test_n}); band50 ${d.band50_coverage === null ? 'n/a' : `${Math.round(d.band50_coverage * 100)}%`} band80 ${d.band80_coverage === null ? 'n/a' : `${Math.round(d.band80_coverage * 100)}%`}\n` +
+    `verdicts: farm ${verdicts.farm}, thin ${verdicts.thin}, skip ${verdicts.skip}\n` +
+    `token radar radar-4: wrote ${join(out, 'board.json')}, ${join(out, 'data.js')}, ${join(out, 'dashboard')} (3 files), ${join(out, 'screenshots')} (${shots.length} images) and ${join(out, 'dossier.json')}\n`,
 );
