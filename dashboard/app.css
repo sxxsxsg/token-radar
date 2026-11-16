@@ -103,6 +103,14 @@ tbody tr[data-openable="true"]:focus-visible { outline: 2px solid var(--focus); 
 .model-panel p { margin: 8px 0 0; color: var(--muted); font-size: 13px; }
 .formula { align-self: center; color: var(--text); font: 12px/1.8 var(--mono); overflow-wrap: anywhere; }
 .formula strong { color: var(--amber); font-weight: 500; }
+.formula h3 { margin: 24px 0 8px; color: var(--text); }
+.formula .model-caveat { margin-top: 16px; color: var(--amber); }
+.comparables > .table-scroll { margin-top: 16px; }
+.comparables td { height: 48px; }
+.comparable-tokens { margin-top: 16px; }
+.comparable-tokens summary { padding: 16px 0; color: var(--cyan); cursor: pointer; }
+.comparable-tokens .table-scroll { max-height: 480px; }
+.comparable-tokens thead { position: sticky; top: 0; }
 .live-callout { display: flex; align-items: center; gap: 16px; margin: 16px 0; padding: 16px; border-left: 2px solid var(--cyan); background: var(--ink-raised); color: var(--muted); }
 .live-callout strong { color: var(--cyan); font: 12px var(--mono); text-transform: uppercase; }
 
@@ -123,7 +131,9 @@ tbody tr[data-openable="true"]:focus-visible { outline: 2px solid var(--focus); 
 .detail-section { padding-top: 32px; }
 .section-head { display: flex; justify-content: space-between; align-items: baseline; gap: 16px; margin-bottom: 16px; }
 .section-head p { margin: 0; color: var(--muted); font-size: 12px; }
-.factor-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.factor-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.farm-economics { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); margin-bottom: 16px; border: 1px solid var(--line); background: var(--ink-raised); }
+.farm-economics .factor { padding: 16px; }
 .factor { min-height: 100px; padding: 16px; border-right: 1px solid var(--line); }
 .factor:first-child { padding-left: 0; }
 .factor:last-child { border: 0; }

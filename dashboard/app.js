@@ -7,7 +7,7 @@
 
   var state = { filter: '', category: 'all', tab: 'pre', sort: 'implied', direction: -1, slug: null };
   var wholeUsd = new Intl.NumberFormat('en-US', { maximumFractionDigits: 0 });
-  var modelFormula = 'implied = round(tvl_usd x 0.30 x (1 + clamp(change_7d,-80,200)/100 x 0.7) x (0.55 + 0.45 x sqrt(min(age_days,1460)/1460)) x (1 + 0.04 x min(max(chains-1,0),4)))';
+  var modelFormula = 'implied = max(1, round(curve_base × category_factor × growth × maturity × chains))';
 
   function element(tag, attrs, children) {
     var el = document.createElement(tag);
@@ -57,16 +57,25 @@
   }
 
   function score(row) {
-    var change = row.change_7d === null || row.change_7d === undefined ? 0 : row.change_7d;
-    var growth = Math.min(200, Math.max(-80, change));
-    var growthMultiplier = 1 + (growth / 100) * 0.7;
-    var age = row.age_days === null || row.age_days === undefined ? 365 : row.age_days;
-    var maturityMultiplier = 0.55 + 0.45 * Math.sqrt(Math.min(Math.max(age, 0), 1460) / 1460);
+    var model = DATA.model;
+    var change = typeof row.change_7d === 'number' && Number.isFinite(row.change_7d) ? row.change_7d : 0;
+    var growth = Math.min(model.growth_cap, Math.max(model.growth_floor, change));
+    var growthMultiplier = 1 + (growth / 100) * model.growth_weight;
+    var age = row.age_days === null || row.age_days === undefined ? model.unknown_age_days : row.age_days;
+    var maturityMultiplier = model.maturity_floor + model.maturity_range * Math.sqrt(Math.min(Math.max(age, 0), model.maturity_days) / model.maturity_days);
     var chains = Array.isArray(row.chains) ? row.chains.length : 0;
     var chainMultiplier = 1 + 0.04 * Math.min(Math.max(chains - 1, 0), 4);
-    var base = row.tvl_usd * 0.30;
-    var implied = Math.max(1, Math.round(base * growthMultiplier * maturityMultiplier * chainMultiplier));
-    return { base: base, growth: growthMultiplier, maturity: maturityMultiplier, chains: chainMultiplier, implied: implied };
+    var base = row.tvl_usd > 0 ? 10 ** (model.a + model.b * Math.log10(row.tvl_usd)) : 0;
+    var category = row.category === null || row.category === undefined ? '' : row.category;
+    var categoryFactor = Object.prototype.hasOwnProperty.call(model.category_factors, category) ? model.category_factors[category] : 1;
+    var implied = Math.max(1, Math.round(base * categoryFactor * growthMultiplier * maturityMultiplier * chainMultiplier));
+    return { base: base, category: categoryFactor, growthPct: growth, growth: growthMultiplier, maturity: maturityMultiplier, chains: chainMultiplier, implied: implied };
+  }
+
+  function netVerdict(row) {
+    var effort = row.farm_economics.total_cost_usd * row.farm_economics.total_time_minutes;
+    var implied = score(row).implied;
+    return implied >= effort ? 'farm' : implied >= effort / 2 ? 'thin' : 'skip';
   }
 
   function parseHash() {
@@ -115,7 +124,7 @@
   function filteredRows(list) {
     var query = state.filter.trim().toLowerCase();
     return list.filter(function (row) {
-      if (state.category !== 'all' && row.category !== state.category) return false;
+      if (state.category !== 'all' && (row.category || 'Other') !== state.category) return false;
       if (!query) return true;
       return [row.name, row.slug, row.category, (row.chains || []).join(' ')].join(' ').toLowerCase().indexOf(query) >= 0;
     });
@@ -144,7 +153,7 @@
         element('div', {}, [text('p', 'Token Radar', 'brand-title'), text('p', 'Independent protocol signals', 'brand-subtitle')])
       ]),
       element('div', { className: 'snapshot' }, [
-        text('div', 'RADAR-2  /  STATIC SNAPSHOT'),
+        text('div', DATA.model_version.toUpperCase() + '  /  STATIC SNAPSHOT'),
         element('div', {}, [text('span', 'As of '), element('strong', { text: DATA.as_of })])
       ])
     ]);
@@ -240,9 +249,59 @@
   }
 
   function modelPanel() {
+    var model = DATA.model;
+    var d = DATA.diagnostics;
+    var counts = { farm: 0, thin: 0, skip: 0 };
+    DATA.rows.forEach(function (row) { counts[netVerdict(row)] += 1; });
+    function metric(value) { return value === null ? 'n/a' : value.toFixed(4); }
     return element('section', { className: 'model-panel', 'aria-labelledby': 'model-title' }, [
-      element('div', {}, [text('h2', 'Radar-2 model', null), text('p', 'A comparative signal. Implied value is an estimate, not a token price.')]),
-      element('div', { className: 'formula', id: 'model-title' }, [element('strong', { text: modelFormula }), text('p', 'Unknown age uses 365 days. Chain breadth comes from each row’s own chain list.')])
+      element('div', {}, [text('h2', 'Radar-3 model', null), text('p', 'OLS fit of live-token market cap against TVL in log10 dollars. All fitted numbers come from this snapshot.')]),
+      element('div', { className: 'formula', id: 'model-title' }, [
+        text('strong', 'log10(mcap) = a + b × log10(tvl)'),
+        text('p', 'a = ' + model.a + ' · b = ' + model.b + ' · n = ' + d.n),
+        text('p', 'R² = ' + metric(d.r2) + ' · median mcap/tvl = ' + metric(d.medianRatio) + '×'),
+        text('h3', 'Backtest · curve only'),
+        text('p', 'Train ' + d.nTrain + ' (listed before 2025-01-01) · test ' + d.nTest + ' (on/after cutoff) · undated excluded from split: ' + (d.n - d.nTrain - d.nTest)),
+        text('p', 'OOS log10 RMSE = ' + metric(d.oosRmse) + ' · mean error (predicted − observed) = ' + metric(d.oosMeanErr) + ' · median absolute error factor = ' + metric(d.medianAbsFactor) + '×'),
+        text('h3', 'Adjustments'),
+        text('p', 'category_factor = clamp(1 + (category median mcap/tvl / overall median mcap/tvl − 1) × n/(n+5), 0.25, 4). Unseen categories use 1; n is the category’s comparable count.'),
+        text('p', 'growth = 1 + clamp(change_7d, ' + model.growth_floor + ', ' + model.growth_cap + ')/100 × ' + model.growth_weight + '; missing growth = 0.'),
+        text('p', 'maturity = ' + model.maturity_floor + ' + ' + model.maturity_range + ' × sqrt(clamp(age_days, 0, ' + model.maturity_days + ')/' + model.maturity_days + '); unknown age = ' + model.unknown_age_days + ' days.'),
+        text('p', 'chains = 1 + 0.04 × min(max(chains.length − 1, 0), 4).'),
+        text('strong', modelFormula),
+        text('h3', 'Net verdict · literal value/effort screen'),
+        text('p', 'farm if implied >= total_cost_usd × total_time_minutes; thin if implied >= half that effort; else skip.'),
+        text('p', 'Across all ' + DATA.rows.length + ' board rows — farm: ' + counts.farm + ' · thin: ' + counts.thin + ' · skip: ' + counts.skip),
+        text('p', 'Totals sum the plan literally: reused capital is counted each time Cost lists it, passive hold time is included, and weekly actions count once. This screen does not estimate payouts or profit.'),
+        text('p', 'The curve is weak (R² about ' + d.r2.toFixed(2) + ', median error factor about ' + (d.medianAbsFactor === null ? 'n/a' : d.medianAbsFactor.toFixed(1) + '×') + '), so implied values are order-of-magnitude estimates, not prices.', 'model-caveat')
+      ])
+    ]);
+  }
+
+  function comparablesPanel() {
+    var summaries = DATA.comparables_summary;
+    return element('section', { className: 'detail-section comparables', 'aria-labelledby': 'comparables-title' }, [
+      text('h2', 'Live comparables behind the fit', null),
+      text('p', DATA.comparables.length + ' tokens with positive market cap and TVL, including CEX. This full fitted set differs from the ' + DATA.live_size + '-token live display sample.', 'detail-meta'),
+      element('div', { className: 'table-scroll', id: 'comparables-title' }, [element('table', {}, [
+        element('caption', { text: 'Comparable counts, median market cap to TVL ratios, and shrunk category factors.' }),
+        element('thead', {}, [element('tr', {}, ['Category', 'Count (n)', 'Median mcap/tvl', 'Category factor'].map(function (label) { return element('th', { scope: 'col', text: label }); }))]),
+        element('tbody', {}, summaries.map(function (group) { return element('tr', {}, [
+          text('td', group.category || 'Other'), text('td', String(group.n), 'metric'),
+          text('td', group.medianRatio.toFixed(4) + '×', 'metric'), text('td', DATA.model.category_factors[group.category].toFixed(4) + '×', 'metric')
+        ]); }))
+      ])]),
+      element('details', { className: 'comparable-tokens' }, [
+        text('summary', 'Inspect all ' + DATA.comparables.length + ' fitted live tokens'),
+        element('div', { className: 'table-scroll' }, [element('table', {}, [
+          element('caption', { text: 'All live tokens used to fit the curve, including CEX.' }),
+          element('thead', {}, [element('tr', {}, ['Token / category', 'TVL', 'Market cap', 'mcap/tvl'].map(function (label) { return element('th', { scope: 'col', text: label }); }))]),
+          element('tbody', {}, DATA.comparables.map(function (comp) { return element('tr', {}, [
+            element('td', {}, [text('span', comp.name, 'protocol-name'), text('span', comp.category || 'Other', 'protocol-meta')]),
+            text('td', exactUsd(comp.tvl_usd), 'metric'), text('td', exactUsd(comp.mcap_usd), 'metric'), text('td', (comp.mcap_usd / comp.tvl_usd).toFixed(4) + '×', 'metric')
+          ]); }))
+        ])])
+      ])
     ]);
   }
 
@@ -250,7 +309,8 @@
     var live = state.tab === 'live';
     var source = state.tab === 'live' ? DATA.live : DATA.rows;
     var rows = filteredRows(source);
-    var categories = Array.from(new Set(DATA.rows.map(function (row) { return row.category || 'Other'; }))).sort(function (a, b) { return a.localeCompare(b); });
+    var categories = Array.from(new Set(source.map(function (row) { return row.category || 'Other'; }))).sort(function (a, b) { return a.localeCompare(b); });
+    if (state.category !== 'all' && categories.indexOf(state.category) < 0) categories.push(state.category);
     var heading = element('section', { className: 'page-heading' }, [
       element('div', {}, [text('p', 'EARLY ASSET FIELD', 'eyebrow'), text('h1', state.tab === 'live' ? 'Already trading' : 'Pre-token radar')]),
       text('p', state.tab === 'live' ? 'Live protocols are shown by market cap and kept outside the pre-token ranking.' : 'A ranked scan of protocols with no token on record.', 'heading-note')
@@ -276,16 +336,17 @@
       ])
     ]);
     var body = element('section', { 'aria-label': live ? 'Live-token protocols' : 'Pre-token board' }, [tabs, toolbar, resultLine, tableView(rows)]);
-    return pageShell(append(element('div', {}), [heading, body, live ? element('div', { className: 'live-callout' }, [text('strong', 'Already trading'), text('span', 'These market caps are listed separately and do not enter the pre-token ranking.')]) : modelPanel()]));
+    return pageShell(append(element('div', {}), [heading, body, live ? element('div', { className: 'live-callout' }, [text('strong', 'Already trading'), text('span', 'These market caps are listed separately and do not enter the pre-token ranking.')]) : null, modelPanel(), comparablesPanel()]));
   }
 
   function factors(row) {
     var values = score(row);
     var labels = [
-      { title: 'Base TVL × 0.30', value: exactUsd(values.base), note: 'TVL multiplied by the base factor' },
-      { title: 'Growth multiplier', value: values.growth.toFixed(4) + '×', note: '7d change clamped to −80%…200%' },
-      { title: 'Maturity multiplier', value: values.maturity.toFixed(4) + '×', note: 'Square-root age curve; unknown age = 365d' },
-      { title: 'Chain-breadth multiplier', value: values.chains.toFixed(4) + '×', note: (row.chains || []).length + ' chains in this row' }
+      { title: 'Curve base value', value: exactUsd(values.base), note: '10^(' + DATA.model.a + ' + ' + DATA.model.b + ' × log10(' + row.tvl_usd + ')) = ' + values.base.toFixed(4) },
+      { title: 'Category factor', value: values.category.toFixed(6) + '×', note: (row.category || 'Other') + ' · shrunk median ratio; unseen category = 1' },
+      { title: 'Growth multiplier', value: values.growth.toFixed(6) + '×', note: 'Clamped 7d growth ' + values.growthPct + '% × weight ' + DATA.model.growth_weight },
+      { title: 'Maturity multiplier', value: values.maturity.toFixed(6) + '×', note: (row.age_days === null ? DATA.model.unknown_age_days + 'd fallback' : row.age_days + 'd old') + ' · square-root progress over ' + DATA.model.maturity_days + 'd' },
+      { title: 'Chain-breadth multiplier', value: values.chains.toFixed(6) + '×', note: (row.chains || []).length + ' chains · 0.04 per extra, capped at 4 extras' }
     ];
     return { values: values, list: element('div', { className: 'factor-grid' }, labels.map(function (item) {
       return element('div', { className: 'factor' }, [element('label', { text: item.title }), element('strong', { text: item.value }), element('small', { text: item.note })]);
@@ -293,32 +354,14 @@
   }
 
   function farmPlan(row) {
-    var capital = row.tvl_usd >= 5000000000 ? 250 : row.tvl_usd >= 1000000000 ? 150 : row.tvl_usd >= 100000000 ? 100 : 50;
-    var hold = row.age_days === null || row.age_days === undefined || row.age_days < 180 ? 60 : row.age_days < 365 ? 45 : 30;
-    var chain = (row.chains || [])[0] || 'the primary chain';
-    var category = (row.category || '').toLowerCase();
-    var operation;
-    if (category.indexOf('lend') >= 0 || category.indexOf('cdp') >= 0 || category.indexOf('collateral') >= 0) operation = 'Supply $' + capital + ' of USDC to ' + row.name + ' on ' + chain + ' and keep the position open.';
-    else if (category.indexOf('dex') >= 0 || category.indexOf('yield') >= 0 || category.indexOf('farm') >= 0 || category.indexOf('liquidity') >= 0) operation = 'Add $' + capital + ' of liquidity to ' + row.name + ' on ' + chain + ' and keep the LP position open.';
-    else if (category.indexOf('bridge') >= 0) operation = 'Bridge $' + capital + ' of USDC through ' + row.name + ' to ' + chain + ' and make a small destination-chain transaction.';
-    else if (category.indexOf('staking') >= 0 || category.indexOf('restak') >= 0) operation = 'Stake $' + capital + ' worth of the network asset through ' + row.name + ' on ' + chain + '.';
-    else if (category.indexOf('curator') >= 0 || category.indexOf('allocator') >= 0) operation = 'Deposit $' + capital + ' into a ' + row.name + ' vault on ' + chain + ' and keep the shares.';
-    else operation = 'Open a small $' + capital + ' position in ' + row.name + ' on ' + chain + ' and retain its receipt or position record.';
-    var records = [
-      ['Check the route', 'Confirm the protocol, supported chain, wallet, and expected transaction before moving funds.', 'No capital; network check only.', '5 minutes'],
-      ['Enter the protocol', operation, '$' + capital + ' position plus about $4 gas.', '15 minutes to set up'],
-      ['Verify the position', 'Confirm the transaction succeeded and the balance or receipt appears in the protocol position.', 'No additional capital; about $2 gas if a correction is needed.', '10 minutes'],
-      ['Keep the position active', 'Leave the position open for ' + hold + ' days and avoid adding funds solely to chase an unverified reward.', 'The $' + capital + ' remains in the position.', hold + ' days'],
-      ['Review once a week', 'Check the position and available protocol activity weekly; do not pay a fee just to claim an unconfirmed reward.', 'About $2 gas per week only if a transaction is required.', '10 minutes weekly'],
-      ['Close and log', 'Unwind when ready, then record the wallet, chain, dates, and transaction hashes for a clean audit trail.', 'Returned capital less market fees and about $4 gas.', '15 minutes']
-    ];
-    return element('ol', { className: 'steps' }, records.map(function (step, index) {
+    return element('ol', { className: 'steps' }, row.farm_steps.map(function (step, index) {
+      var parts = /^(.*?) Cost:\s*(.*?)\s*Time:\s*(.*)$/.exec(step);
       return element('li', { className: 'step' }, [
         text('span', String(index + 1).padStart(2, '0'), 'step-number'),
-        element('div', {}, [text('h3', step[0]), text('p', step[1]), element('div', { className: 'step-meta' }, [
-          element('span', {}, [element('strong', { text: 'Cost: ' }), text('span', step[2])]),
-          element('span', {}, [element('strong', { text: 'Time: ' }), text('span', step[3])])
-        ])])
+        element('div', {}, [text('h3', 'Step ' + (index + 1)), text('p', parts ? parts[1] : step), element('div', { className: 'step-meta' }, parts ? [
+          element('span', {}, [element('strong', { text: 'Cost: ' }), text('span', parts[2])]),
+          element('span', {}, [element('strong', { text: 'Time: ' }), text('span', parts[3])])
+        ] : [])])
       ]);
     }));
   }
@@ -354,7 +397,12 @@
       element('ul', { className: 'chain-list', id: 'chains-title' }, chains.length ? chains : [element('li', { text: 'No chain data' })])
     ]);
     var farmSection = element('section', { className: 'detail-section', 'aria-labelledby': 'farm-title' }, [
-      element('div', { className: 'section-head' }, [text('h2', 'Six-step farm plan', null), text('p', 'Indicative costs and time for each action.')]),
+      element('div', { className: 'section-head' }, [text('h2', 'Six-step farm plan', null), text('p', 'The exact six actions and literal costs/time recorded in board.json.')]),
+      element('div', { className: 'farm-economics' }, [
+        element('div', { className: 'factor' }, [text('label', 'Total cost'), text('strong', exactUsd(row.farm_economics.total_cost_usd)), text('small', 'Literal Cost sum, including repeated capital')]),
+        element('div', { className: 'factor' }, [text('label', 'Total time'), text('strong', row.farm_economics.total_time_minutes + ' minutes'), text('small', 'Includes passive hold; weekly actions counted once')]),
+        element('div', { className: 'factor' }, [text('label', 'Net verdict: ' + netVerdict(row)), text('strong', netVerdict(row).toUpperCase()), text('small', 'Effort threshold: ' + exactUsd(row.farm_economics.total_cost_usd) + ' × ' + row.farm_economics.total_time_minutes + ' minutes = ' + wholeUsd.format(row.farm_economics.total_cost_usd * row.farm_economics.total_time_minutes))])
+      ]),
       element('div', { id: 'farm-title' }, [farmPlan(row)])
     ]);
     return pageShell(append(element('article', {}), [heading, summary, factorSection, chainSection, farmSection]));
